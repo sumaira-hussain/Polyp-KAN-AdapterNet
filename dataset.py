@@ -17,11 +17,57 @@ import numpy as np
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
+
 from ..utils import LOCAL_RANK, NUM_THREADS, TQDM_BAR_FORMAT, is_dir_writeable
 from .augment import Compose, Format, Instances, LetterBox, classify_albumentations, classify_transforms, v8_transforms
 from .base import BaseDataset
 from .utils import HELP_URL, LOGGER, get_hash, img2label_paths, verify_image_label
 
+
+class SharedMemoryCache:
+    """Simplified version for demonstration"""
+
+    def __init__(self, size=2048):
+        self.cache = {}
+        self.size = size
+        self.keys = []
+
+    def __contains__(self, key):
+        return key in self.cache
+
+    def __setitem__(self, key, value):
+        if len(self.cache) >= self.size:
+            del_key = self.keys.pop(0)
+            del self.cache[del_key]
+        self.cache[key] = value
+        self.keys.append(key)
+
+    def __getitem__(self, key):
+        return self.cache[key]
+
+
+class CachedDataset(Dataset):
+    def __init__(self, base_dataset):
+        super().__init__()
+        self.base_dataset = base_dataset
+        self.cache = SharedMemoryCache(size=2048)
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        if idx in self.cache:
+            return self.cache[idx]
+
+        sample = self.base_dataset[idx]
+        # Convert numpy arrays to pinned tensors
+        if isinstance(sample['image'], np.ndarray):
+            sample['image'] = torch.from_numpy(sample['image']).pin_memory()
+        if isinstance(sample['mask'], np.ndarray):
+            sample['mask'] = torch.from_numpy(sample['mask']).pin_memory()
+
+        self.cache[idx] = sample
+        return sample
 
 class KvasirSegDataset(Dataset):
     def __init__(self, image_dir, mask_dir, transform=None):
@@ -42,25 +88,32 @@ class KvasirSegDataset(Dataset):
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
+        # Fix mask processing
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        mask = np.expand_dims(mask, axis=-1)  # Add channel dimension if needed
+        # mask = np.expand_dims(mask, axis=-1)  # Add channel dimension if needed
+        mask = (mask > 127).astype(np.float32)  # Threshold to binary
+        mask = mask[..., None]  # Shape [H,W,1]
 
         # Create the image_meta_dict with necessary metadata
         # image_meta_dict = {
         #     'filename_or_obj': self.images[idx],  # Store the filename of the image
         # }
-        image_meta_dict = {
-            "filename_or_obj": img_path,
-            "spatial_shape": image.shape[:2],
-            "original_channel_dim": -1,
-            "channel_dim": -1,
-            "affine": np.eye(4),
-        }
+        # image_meta_dict = {
+        #     "filename_or_obj": img_path,
+        #     "spatial_shape": image.shape[:2],
+        #     "original_channel_dim": -1,
+        #     "channel_dim": -1,
+        #     "affine": np.eye(4),
+        # }
+        # Simplify metadata
+        image_meta_dict = {"id": os.path.basename(img_path)}
 
+        # Add polyp-specific augmentations
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
             image = augmented["image"]
-            mask = augmented["mask"].float()  # Ensure float type
+            # mask = augmented["mask"].float()  # Ensure float type
+            mask = augmented["mask"].permute(2, 0, 1)  # [C,H,W]
             # Explicit channel-first enforcement
             if image.shape[0] != 3:
                 raise ValueError(f"Invalid channel order: {image.shape}")

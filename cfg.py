@@ -46,11 +46,9 @@ def parse_args():
     parser.add_argument('-evl_chunk', type=int, default=None , help='evaluation chunk')
     parser.add_argument('-mid_dim', type=int, default=None , help='middle dim of adapter or the rank of lora matrix')
     parser.add_argument('-multimask_output', type=int, default=1 , help='the number of masks output for multi-class segmentation, set 2 for REFUGE dataset.')
-    parser.add_argument(
-    '-data_path',
-    type=str,
-    default='../data',
-    help='The path of segmentation data')
+    parser.add_argument('-data_path', type=str, default='../data', help='The path of segmentation data')
+    parser.add_argument('--amp', action='store_true', help='Enable mixed precision training')
+    parser.add_argument('--cache_warmup', action='store_true', default=False, help='Preload all dataset samples into memory')
     # '../dataset/RIGA/DiscRegion'
     # '../dataset/ISIC'
     opt = parser.parse_args()

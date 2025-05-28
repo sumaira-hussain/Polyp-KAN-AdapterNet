@@ -29,6 +29,7 @@ from tensorboardX import SummaryWriter
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from losses import *
 
 import cfg
 import models.sam.utils.transforms as samtrans
@@ -112,7 +113,7 @@ def generate_click_prompt(img, msk, pt_label = 1):
 
 
 
-def train_sam(args, net: nn.Module, optimizer, train_loader,
+def train_sam(args, net: nn.Module, optimizer, scaler, train_loader,
               epoch, writer, schedulers=None, vis=50):
 
     hard = 0
@@ -127,10 +128,25 @@ def train_sam(args, net: nn.Module, optimizer, train_loader,
     epoch_loss = 0
     # GPUdevice = torch.device('cuda:' + str(args.gpu_device))
 
-    if args.thd:
-        lossfunc = DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
-    else:
-        lossfunc = criterion_G
+    # New loss composition
+    class CombinedLoss(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dice = DiceCELoss(sigmoid=True, squared_pred=True,
+                                   reduction='mean') if args.thd else nn.BCEWithLogitsLoss()
+            self.focal = FocalLoss()
+            self.surface = SurfaceLoss()
+
+        def forward(self, pred, target):
+            return (self.dice(pred, target)
+                    + 0.5 * self.focal(pred, target)
+                    + 0.2 * self.surface(pred, target))
+
+    lossfunc = CombinedLoss().to(GPUdevice)
+    # if args.thd:
+    #     lossfunc = DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
+    # else:
+    #     lossfunc = criterion_G
 
     with tqdm(total=len(train_loader), desc=f'Epoch {epoch}', unit='img') as pbar:
         for pack in train_loader:
@@ -199,35 +215,51 @@ def train_sam(args, net: nn.Module, optimizer, train_loader,
 
             '''Train'''
             if args.mod == 'sam_adpt':
-                # print("UKAN attributes:", dir(net))
-                # Define which parts are adapters and which aren't
-                adapter_names = ['adapt1', 'adapt2', 'adapt3']
-                encoder_names = ['encoder1', 'encoder2', 'encoder3',
-                                 'patch_embed3', 'patch_embed4',
-                                 'block1', 'block2', 'norm3', 'norm4']
+                # Trainable components
+                trainable_params = [
+                    'adapt1', 'adapt2', 'adapt3',  # Adapters
+                    'prompt_emb',  # Hyp-Ada prompt
+                    'decoder1', 'decoder2',  # First 2 decoder stages
+                    'final'  # Final conv layer
+                ]
 
-                # Freeze encoder layers
-                for name in encoder_names:
-                    if hasattr(net, name):
-                        module = getattr(net, name)
-                        for n, value in module.named_parameters():
-                            value.requires_grad = False
-                    else:
-                        print(f"[WARNING] Encoder module '{name}' not found.")
+                # Freeze ALL parameters first
+                for param in net.parameters():
+                    param.requires_grad = False
 
-                # Unfreeze adapters
-                for name in adapter_names:
-                    if hasattr(net, name):
-                        module = getattr(net, name)
-                        for n, value in module.named_parameters():
-                            value.requires_grad = True
-                    else:
-                        print(f"[WARNING] Adapter module '{name}' not found.")
-                # for n, value in net.image_encoder.named_parameters():
-                #     if "Adapter" not in n:
-                #         value.requires_grad = False
+                # Unfreeze specific components
+                for name, param in net.named_parameters():
+                    if any(key in name for key in trainable_params):
+                        param.requires_grad = True
+                # # print("UKAN attributes:", dir(net))
+                # # Define which parts are adapters and which aren't
+                # adapter_names = ['adapt1', 'adapt2', 'adapt3']
+                # encoder_names = ['encoder1', 'encoder2', 'encoder3',
+                #                  'patch_embed3', 'patch_embed4',
+                #                  'block1', 'block2', 'norm3', 'norm4']
+                #
+                # # Freeze encoder layers
+                # for name in encoder_names:
+                #     if hasattr(net, name):
+                #         module = getattr(net, name)
+                #         for n, value in module.named_parameters():
+                #             value.requires_grad = False
                 #     else:
-                #         value.requires_grad = True
+                #         print(f"[WARNING] Encoder module '{name}' not found.")
+                #
+                # # Unfreeze adapters
+                # for name in adapter_names:
+                #     if hasattr(net, name):
+                #         module = getattr(net, name)
+                #         for n, value in module.named_parameters():
+                #             value.requires_grad = True
+                #     else:
+                #         print(f"[WARNING] Adapter module '{name}' not found.")
+                # # for n, value in net.image_encoder.named_parameters():
+                # #     if "Adapter" not in n:
+                # #         value.requires_grad = False
+                # #     else:
+                # #         value.requires_grad = True
             elif args.mod == 'sam_lora' or args.mod == 'sam_adalora':
                 from models.common import loralib as lora
                 lora.mark_only_lora_as_trainable(net.image_encoder)
@@ -247,25 +279,27 @@ def train_sam(args, net: nn.Module, optimizer, train_loader,
                 imge = net.image_encoder(imgs)
             else:
                 imge = net(imgs)  # fallback to UKAN forward()
-            with torch.set_grad_enabled(args.net == 'polyp_kan'): # enables gradients only for polyp_kan
-                if args.net == 'polyp_kan':
 
-                    imgs = pack['image'].requires_grad_(True)  # Force input grad tracking
-                    imgs = imgs.to(GPUdevice)  # Make sure this matches your model device
-                    pred = net(imgs)  # Direct UKAN forward pass
+            with torch.cuda.amp.autocast(enabled=args.amp):  # Mixed precision context
+                with torch.set_grad_enabled(args.net == 'polyp_kan'): # enables gradients only for polyp_kan
+                    if args.net == 'polyp_kan':
 
-                elif args.net == 'sam' or args.net == 'mobile_sam':
-                    se, de = net.prompt_encoder(
+                        imgs = pack['image'].requires_grad_(True)  # Force input grad tracking
+                        imgs = imgs.to(GPUdevice)  # Make sure this matches your model device
+                        pred = net(imgs)  # Direct UKAN forward pass
+
+                    elif args.net == 'sam' or args.net == 'mobile_sam':
+                        se, de = net.prompt_encoder(
                         points=pt,
                         boxes=None,
                         masks=None,
-                    )
-                elif args.net == "efficient_sam":
-                    coords_torch, labels_torch = transform_prompt(coords_torch, labels_torch, h, w)
-                    se = net.prompt_encoder(
+                        )
+                    elif args.net == "efficient_sam":
+                        coords_torch, labels_torch = transform_prompt(coords_torch, labels_torch, h, w)
+                        se = net.prompt_encoder(
                         coords=coords_torch,
                         labels=labels_torch,
-                    )
+                        )
 
             if args.net == 'sam':
                 pred, _ = net.mask_decoder(
@@ -315,16 +349,33 @@ def train_sam(args, net: nn.Module, optimizer, train_loader,
             pbar.set_postfix(**{'loss (batch)': loss.item()})
             epoch_loss += loss.item()
 
-            # nn.utils.clip_grad_value_(net.parameters(), 0.1)
+            # Unified gradient handling
+            scaler.scale(loss).backward()  # Scale loss
             if args.mod == 'sam_adalora':
-                (loss + lora.compute_orth_regu(net, regu_weight=0.1)).backward()
-                optimizer.step()
-                rankallocator.update_and_mask(net, ind)
-            else:
-                loss.backward()
-                optimizer.step()
+                lora_loss = loss + lora.compute_orth_regu(net, regu_weight=0.1)
+                scaler.scale(lora_loss).backward()
 
-            optimizer.zero_grad()
+                # Gradient clipping
+            scaler.unscale_(optimizer)  # Unscale before clipping
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+
+            # Optimizer step
+            scaler.step(optimizer)
+            scaler.update()
+
+            # Lion-specific zero_grad
+            optimizer.zero_grad(set_to_none=True)  # Critical for Lion
+
+            # nn.utils.clip_grad_value_(net.parameters(), 0.1)
+            # if args.mod == 'sam_adalora':
+            #     (loss + lora.compute_orth_regu(net, regu_weight=0.1)).backward()
+            #     optimizer.step()
+            #     rankallocator.update_and_mask(net, ind)
+            # else:
+            #     loss.backward()
+            #     optimizer.step()
+            #
+            # optimizer.zero_grad()
 
             '''vis images'''
             if vis:
@@ -347,7 +398,7 @@ def train_sam(args, net: nn.Module, optimizer, train_loader,
     return loss
 
 
-def validation_sam(args, val_loader, epoch, net: nn.Module, clean_dir=True):
+def validation_sam(args, val_loader, epoch, net: nn.Module, writer, clean_dir=True):
     save_dir = 'D:/2025-research/Polyp-KAN-AdapterNet/output/samples/Testval'
     os.makedirs(save_dir, exist_ok=True)  # <--- Add this line
 
@@ -507,6 +558,8 @@ def validation_sam(args, val_loader, epoch, net: nn.Module, clean_dir=True):
 
                     # Resize to the ordered output size
                     # pred = F.interpolate(pred, size=(args.out_size, args.out_size)) # works for other models but not polyp_kan
+                    prompt_norm = torch.norm(net.prompt_emb).item()
+                    writer.add_scalar('Val/PromptNorm', prompt_norm, epoch)
                     tot += lossfunc(pred, masks)
 
                     '''vis images'''
