@@ -5,6 +5,7 @@ import cv2
 import torch
 import numpy as np
 
+
 class KvasirSegDataset(Dataset):
     def __init__(self, img_dir, mask_dir, transforms=None):
         self.img_paths  = sorted([os.path.join(img_dir, f) for f in os.listdir(img_dir)])
@@ -15,19 +16,71 @@ class KvasirSegDataset(Dataset):
         return len(self.img_paths)
 
     def __getitem__(self, idx):
+        # Load mask first with proper thresholding
+        mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
+        mask = (mask > 127).astype(np.float32)  # Threshold EARLY at numpy level
+        mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)  # Match albumentations input format
         img  = cv2.imread(self.img_paths[idx])[:,:,::-1]  # BGR→RGB
-        mask = cv2.imread(self.mask_paths[idx], 0)        # grayscale
+        # mask = cv2.imread(self.mask_paths[idx], 0)        # grayscale
         if self.transforms:
             data = self.transforms(image=img, mask=mask)
             img, mask = data["image"], data["mask"]
-        if isinstance(img, np.ndarray):
-            img = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.  # HWC → CHW
+        # if isinstance(img, np.ndarray):
+        #     img = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.  # HWC → CHW
+        #
+        # if isinstance(mask, np.ndarray):
+        #     mask = torch.from_numpy(mask)
+        #
+        # mask = (mask.unsqueeze(0).float() > 127).float()
 
-        if isinstance(mask, np.ndarray):
-            mask = torch.from_numpy(mask)
+        return {'image': img, 'mask': mask,
+                'image_meta_dict': { 'filename_or_obj': os.path.basename(self.img_paths[idx])}
+                 }
+                # "image_meta_dict": {"filename_or_obj": self.img_paths[idx]}
 
-        mask = (mask.unsqueeze(0).float() > 127).float()
-
-        return {'image': img, 'mask': mask, "image_meta_dict": {"filename_or_obj": self.img_paths[idx]} }
 
         # return img, mask
+
+
+class CachedKvasir(KvasirSegDataset):
+    def __init__(self, img_dir, mask_dir, transforms=None, cache_policy='train'):
+        super().__init__(img_dir, mask_dir, transforms)
+        self.cache_policy = cache_policy
+        self._init_cache()
+
+    def _init_cache(self):
+        if self.cache_policy == 'train':
+            self.cache_size = len(self)  # Cache entire dataset
+            self.pin_memory = True
+        elif self.cache_policy == 'val':
+            self.cache_size = min(512, len(self))  # Cap at 512
+            self.pin_memory = True
+        else:  # test
+            self.cache_size = 0
+            self.pin_memory = False
+
+        self.cache = {}
+        self.cache_order = []
+
+    def __getitem__(self, idx):
+        try:
+            return super().__getitem__(idx)
+        except:
+            return self._load_random_valid_sample()
+
+        if idx in self.cache:
+            return self.cache[idx]
+
+        sample = super().__getitem__(idx)
+
+        if self.pin_memory:
+            sample['image'] = sample['image'].pin_memory()
+            sample['mask'] = sample['mask'].pin_memory()
+
+        if self.cache_size > 0:
+            if len(self.cache) >= self.cache_size:
+                del self.cache[self.cache_order.pop(0)]
+            self.cache[idx] = sample
+            self.cache_order.append(idx)
+
+        return sample
