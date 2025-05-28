@@ -249,14 +249,26 @@ class UKAN(nn.Module):
 
         kan_input_dim = embed_dims[0]
 
-        self.encoder1 = ConvLayer(3, kan_input_dim // 8) # → 32 channels
+        self.encoder1 = ConvLayer(
+            in_channels=3,
+            out_channels=16  # kan_input_dim//8 when kan_input_dim=128
+        )
+        # self.encoder1 = ConvLayer(3, kan_input_dim // 8) # → 32 channels
         # # Ensure encoder outputs maintain gradients
         # self.encoder1 = ConvLayer(3, kan_input_dim // 8).apply(lambda m: m.register_forward_hook(
         #     lambda module, input, output: output.retain_grad() if output.requires_grad else None
         # ))
-        self.encoder2 = ConvLayer(kan_input_dim // 8, kan_input_dim // 4) # → 64 channels
+        self.encoder2 = ConvLayer(
+            in_channels=16,  # Must match encoder1 output
+            out_channels=32  # kan_input_dim//4 when kan_input_dim=128
+        )
+        # self.encoder2 = ConvLayer(kan_input_dim // 8, kan_input_dim // 4) # → 64 channels
         # self.encoder3 = ConvLayer(kan_input_dim // 4, kan_input_dim) # → 256 channels
-        self.encoder3 = ConvLayer(64, 256)  # 64 → 256 channels
+        self.encoder3 = ConvLayer(
+            in_channels=32,  # Must match encoder2 output
+            out_channels=256
+        )
+        # self.encoder3 = ConvLayer(64, 256)  # 64 → 256 channels
 
         # ===== NEW ADAPTERS =====
         self.adapt1 = Adapter(in_channels=embed_dims[0] // 8) # , reduction=16)
@@ -326,14 +338,17 @@ class UKAN(nn.Module):
 
         ### Stage 1
         out = F.relu(F.max_pool2d(self.adapt1(self.encoder1(x)), 2, 2))
+        assert self.encoder1(x).size(1) == 16, f"Encoder1 output: {self.encoder1(x).shape}"
         t1 = out
 
         ### Stage 2
         out = F.relu(F.max_pool2d(self.adapt2(self.encoder2(out)), 2, 2))
+        assert self.encoder2(out).size(1) == 32, f"Encoder2 output: {self.encoder2(out).shape}"
         t2 = out
 
         ### Stage 3
         out = F.relu(F.max_pool2d(self.adapt3(self.encoder3(out)), 2, 2))
+        assert self.encoder3(out).size(1) == 256, f"Encoder3 output: {self.encoder3(out).shape}"
         t3 = out
 
 

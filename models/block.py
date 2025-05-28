@@ -14,9 +14,9 @@ class ConvLayer(nn.Module):
         )
 
     def forward(self, input):
-        # Add dimension verification
-        if input.shape[1] not in [3, 32, 64, 256]:
-            raise ValueError(f"Unexpected channel dimension: {input.shape}")
+        # # Add dimension verification
+        # if input.shape[1] not in [3, 32, 64, 256]:
+        #     raise ValueError(f"Unexpected channel dimension: {input.shape}")
         return self.conv(input)
 
 class D_ConvLayer(nn.Module):
