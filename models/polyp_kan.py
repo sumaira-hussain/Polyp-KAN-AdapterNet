@@ -5,12 +5,21 @@ from torch import nn
 from torch.nn import init
 from torch.nn import functional as F
 from models.block import ConvLayer, D_ConvLayer
-from models.adapter import Adapter
+from models.adapter import Adapter, HypAdaParallelAdapter
 import timm
 from timm.layers import DropPath, to_2tuple, trunc_normal_
 from models.kan import KANLinear, KAN
 
 
+def _init_prompts(self):
+    for name, param in self.named_parameters():
+        if "prompt_emb" in name:
+            nn.init.normal_(param, mean=0.0, std=0.02)  # Small init
+        if "hyp_net" in name:
+            if 'weight' in name:
+                nn.init.kaiming_normal_(param)
+            elif 'bias' in name:
+                nn.init.constant_(param, 0)
 
 class KANLayer(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., no_kan=False):
@@ -240,9 +249,14 @@ class PatchEmbed(nn.Module):
 
 class UKAN(nn.Module):
     def __init__(self, num_classes, input_channels=3, deep_supervision=False, img_size=224, patch_size=16, in_chans=3,
-                 embed_dims=[256, 320, 512], no_kan=False,
+                 #embed_dims=[256, 320, 512],
+                 embed_dims=[128, 256, 512],
+                 no_kan=False,
                  drop_rate=0., drop_path_rate=0., norm_layer=nn.LayerNorm, depths=[1, 1, 1], **kwargs):
         super().__init__()
+
+        # Add channel reduction layer
+        self.channel_reduction = nn.Conv2d(256, embed_dims[0], kernel_size=1)
 
         # ========== NEW: Final Upsample Layer ========== ✨ Critical Change ✨
         self.upsample_final = nn.Upsample(size=(352, 352), mode='bilinear', align_corners=True)
@@ -250,8 +264,8 @@ class UKAN(nn.Module):
         kan_input_dim = embed_dims[0]
 
         self.encoder1 = ConvLayer(
-            in_channels=3,
-            out_channels=16  # kan_input_dim//8 when kan_input_dim=128
+            3, # in_channels=3
+            16  # out_channels=16      kan_input_dim//8 when kan_input_dim=128
         )
         # self.encoder1 = ConvLayer(3, kan_input_dim // 8) # → 32 channels
         # # Ensure encoder outputs maintain gradients
@@ -259,21 +273,27 @@ class UKAN(nn.Module):
         #     lambda module, input, output: output.retain_grad() if output.requires_grad else None
         # ))
         self.encoder2 = ConvLayer(
-            in_channels=16,  # Must match encoder1 output
-            out_channels=32  # kan_input_dim//4 when kan_input_dim=128
+            16,  # Must match encoder1 output in_channels=16
+            32  # kan_input_dim//4 when kan_input_dim=128  out_channels=32
         )
         # self.encoder2 = ConvLayer(kan_input_dim // 8, kan_input_dim // 4) # → 64 channels
         # self.encoder3 = ConvLayer(kan_input_dim // 4, kan_input_dim) # → 256 channels
         self.encoder3 = ConvLayer(
-            in_channels=32,  # Must match encoder2 output
-            out_channels=256
+            32,  # Must match encoder2 output in_channels=32
+            256 #out_channels=256
         )
         # self.encoder3 = ConvLayer(64, 256)  # 64 → 256 channels
 
         # ===== NEW ADAPTERS =====
-        self.adapt1 = Adapter(in_channels=embed_dims[0] // 8) # , reduction=16)
-        self.adapt2 = Adapter(in_channels=embed_dims[0] // 4) # , reduction=16)
-        self.adapt3 = Adapter(in_channels=embed_dims[0]) # , reduction=16)
+        # self.adapt1 = Adapter(in_channels=embed_dims[0] // 8) # , reduction=16)
+        # self.adapt2 = Adapter(in_channels=embed_dims[0] // 4) # , reduction=16)
+        # self.adapt3 = Adapter(in_channels=embed_dims[0]) # , reduction=16)
+        self.adapters = nn.ModuleDict({
+            'adapt1': HypAdaParallelAdapter(16),  # Matches encoder1 output
+            'adapt2': HypAdaParallelAdapter(32),  # Matches encoder2 output
+            'adapt3': HypAdaParallelAdapter(256)  # Matches encoder3 output
+        })
+        self.prompt_emb = nn.Parameter(torch.randn(256)) # Learnable global prompt
         # ========================
 
         self.norm3 = norm_layer(embed_dims[1])
@@ -333,28 +353,40 @@ class UKAN(nn.Module):
             x = x.permute(0, 3, 1, 2).contiguous()  # [B, H, W, C] → [B, C, H, W]
 
         B = x.shape[0]
+
+        # Get shared prompt embedding for all adapters
+        prompt_emb = self.prompt_emb.expand(B, -1)  # [B, 256]
+
         ### Encoder
         ### Conv Stage
 
         ### Stage 1
-        out = F.relu(F.max_pool2d(self.adapt1(self.encoder1(x)), 2, 2))
-        assert self.encoder1(x).size(1) == 16, f"Encoder1 output: {self.encoder1(x).shape}"
+
+        # out = F.relu(F.max_pool2d(self.adapt1(self.encoder1(x)), 2, 2))
+        enc1 = self.encoder1(x)
+        adapt1 = self.adapters['adapt1'](enc1, prompt_emb)
+        out = F.relu(F.max_pool2d(adapt1, 2, 2))
         t1 = out
 
         ### Stage 2
-        out = F.relu(F.max_pool2d(self.adapt2(self.encoder2(out)), 2, 2))
-        assert self.encoder2(out).size(1) == 32, f"Encoder2 output: {self.encoder2(out).shape}"
+        # out = F.relu(F.max_pool2d(self.adapt2(self.encoder2(out)), 2, 2))
+        enc2 = self.encoder2(t1)  # Pass t1 (16 channels) to encoder2
+        adapt2 = self.adapters['adapt2'](enc2, prompt_emb)
+        out = F.relu(F.max_pool2d(adapt2, 2, 2))
         t2 = out
 
         ### Stage 3
-        out = F.relu(F.max_pool2d(self.adapt3(self.encoder3(out)), 2, 2))
-        assert self.encoder3(out).size(1) == 256, f"Encoder3 output: {self.encoder3(out).shape}"
+        # out = F.relu(F.max_pool2d(self.adapt3(self.encoder3(out)), 2, 2))
+        enc3 = self.encoder3(t2)  # Pass t2 (32 channels) to encoder3
+        adapt3 = self.adapters['adapt3'](enc3, prompt_emb)
+        out = F.relu(F.max_pool2d(adapt3, 2, 2))
         t3 = out
 
 
         ### Tokenized KAN Stage
         ### Stage 4
 
+        out = self.channel_reduction(t3) # Apply channel reduction to match patch_embed3 expectations
         out, H, W = self.patch_embed3(out)
         for i, blk in enumerate(self.block1):
             out = blk(out, H, W)
