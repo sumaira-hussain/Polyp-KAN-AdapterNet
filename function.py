@@ -559,7 +559,8 @@ def validation_sam(args, val_loader, epoch, net: nn.Module, writer, clean_dir=Tr
                     # Resize to the ordered output size
                     # pred = F.interpolate(pred, size=(args.out_size, args.out_size)) # works for other models but not polyp_kan
                     prompt_norm = torch.norm(net.prompt_emb).item()
-                    writer.add_scalar('Val/PromptNorm', prompt_norm, epoch)
+                    if writer is not None:  # Handle cases where writer might be None
+                         writer.add_scalar('Val/PromptNorm', prompt_norm, epoch)
                     tot += lossfunc(pred, masks)
 
                     '''vis images'''
