@@ -138,9 +138,14 @@ def train_sam(args, net: nn.Module, optimizer, scaler, train_loader,
             self.surface = SurfaceLoss()
 
         def forward(self, pred, target):
-            return (self.dice(pred, target)
-                    + 0.5 * self.focal(pred, target)
-                    + 0.2 * self.surface(pred, target))
+            # Ensure scalar losses
+            dice = self.dice(pred, target)
+            focal = self.focal(pred, target).mean()  # Add reduction
+            surface = self.surface(pred, target).mean()  # Add reduction
+            return dice + 0.5 * focal + 0.2 * surface
+            # return (self.dice(pred, target)
+            #         + 0.5 * self.focal(pred, target)
+            #         + 0.2 * self.surface(pred, target))
 
     lossfunc = CombinedLoss().to(GPUdevice)
     # if args.thd:
@@ -339,10 +344,25 @@ def train_sam(args, net: nn.Module, optimizer, scaler, train_loader,
             # Ensure masks have correct dimensions [B, C, H, W]
             masks = masks.squeeze(-1)  # Remove last dimension if present
 
+            if masks.shape[1] != 1:
+                # If masks have multiple channels, take first channel only
+                masks = masks[:, :1]
+            if masks.size(-1) != pred.size(-1) or masks.size(-2) != pred.size(-2):
+                # Resize masks to match prediction
+                masks = F.interpolate(masks, size=pred.shape[-2:], mode='nearest')
+
             assert pred.shape[-2:] == masks.shape[-2:], \
                 f"Shape mismatch: pred {pred.shape} vs mask {masks.shape}"
 
             loss = lossfunc(pred, masks)
+
+            if not torch.isfinite(loss).all():
+                print(f"NaN/Inf loss detected! Pred min/max: {pred.min().item():.4f}/{pred.max().item():.4f}")
+
+            if loss.dim() > 0:  # If loss is not scalar
+                print(f"Unexpected loss shape: {loss.shape} - forcing mean reduction")
+                loss = loss.mean()  # Emergency reduction
+
             if loss.requires_grad:
                 loss.retain_grad()
 
