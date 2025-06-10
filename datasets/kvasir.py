@@ -25,6 +25,16 @@ class KvasirSegDataset(Dataset):
         if self.transforms:
             data = self.transforms(image=img, mask=mask)
             img, mask = data["image"], data["mask"]
+        # Ensure mask has proper shape [1, H, W]
+        if mask.dim() == 3 and mask.shape[0] == 1:
+            # Already in [1, H, W] format
+            pass
+        elif mask.dim() == 2:
+            mask = mask.unsqueeze(0)  # Add channel dimension
+        else:
+            # Handle unexpected format
+            mask = mask[:1]  # Take first channel if multiple exist
+
         # if isinstance(img, np.ndarray):
         #     img = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.  # HWC → CHW
         #
