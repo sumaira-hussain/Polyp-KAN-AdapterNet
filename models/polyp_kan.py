@@ -255,8 +255,10 @@ class UKAN(nn.Module):
                  drop_rate=0., drop_path_rate=0., norm_layer=nn.LayerNorm, depths=[1, 1, 1], **kwargs):
         super().__init__()
 
-        # Add channel reduction layer
+        # Add channel reduction layers
         self.channel_reduction = nn.Conv2d(256, embed_dims[0], kernel_size=1)
+        # Add channel projection for t3 skip connection
+        self.t3_proj = nn.Conv2d(256, embed_dims[0], kernel_size=1)
 
         # ========== NEW: Final Upsample Layer ========== ✨ Critical Change ✨
         self.upsample_final = nn.Upsample(size=(352, 352), mode='bilinear', align_corners=True)
@@ -416,7 +418,10 @@ class UKAN(nn.Module):
         out = self.dnorm3(out)
         out = out.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
         out = F.relu(F.interpolate(self.decoder2(out), scale_factor=(2, 2), mode='bilinear'))
-        out = torch.add(out, t3)
+        # Project t3 to match channel dimensions before adding
+        t3_proj = self.t3_proj(t3)
+        out = torch.add(out, t3_proj)
+        # out = torch.add(out, t3)
         _, _, H, W = out.shape
         out = out.flatten(2).transpose(1, 2)
 
