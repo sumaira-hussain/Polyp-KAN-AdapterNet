@@ -38,7 +38,12 @@ class FocalLoss(nn.Module):
     def forward(self, pred, target):
         bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
         pt = torch.exp(-bce)
-        return self.alpha * (1 - pt) ** self.gamma * bce.mean()
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce
+
+        # Return per-sample mean instead of per-pixel
+        return focal_loss.mean(dim=(1, 2, 3))  # Reduce H,W dimensions
+        # return self.alpha * (1 - pt) ** self.gamma * bce.mean()
+
 
 
 class SurfaceLoss(nn.Module):
@@ -55,5 +60,12 @@ class SurfaceLoss(nn.Module):
 
         boundary = F.conv2d(target, kernel, padding=1)
         boundary = (boundary > 0) & (boundary < 9)  # Edge detection
-        return F.binary_cross_entropy_with_logits(pred, target,
-                                                  weight=boundary.float() + self.eps)
+        # Per-pixel loss → per-sample mean
+        loss_map = F.binary_cross_entropy_with_logits(
+            pred, target,
+            weight=boundary.float() + self.eps,
+            reduction='none'
+        )
+        return loss_map.mean(dim=(1, 2, 3))  # Reduce spatial dimensions
+        # return F.binary_cross_entropy_with_logits(pred, target,
+        #                                           weight=boundary.float() + self.eps)

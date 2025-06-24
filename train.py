@@ -21,8 +21,46 @@ from albumentations.pytorch import ToTensorV2
 from torch.cuda.amp import GradScaler
 from lion_pytorch import Lion
 
+import GPUtil
+from pathlib import Path
+import matplotlib.pyplot as plt
+import numpy as np
+import torchvision
+
+class EarlyStopper:
+    def __init__(self, patience=15, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_dice = 0
+
+    def __call__(self, current_dice):
+        if current_dice > self.best_dice + self.min_delta:
+            self.best_dice = current_dice
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
 
 
+def create_overlay(image, prediction):
+    """Create image + prediction overlay"""
+    # Denormalize image
+    image = image.cpu()
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    image = image * std + mean
+    image = torch.clamp(image, 0, 1)
+
+    # Create prediction mask (red)
+    pred_mask = torch.zeros_like(image)
+    pred_mask[0] = prediction.cpu().float()  # Red channel
+
+    # Blend image and prediction
+    overlay = torch.clamp(image + pred_mask, 0, 1)
+    return overlay
 
 def main():
     args = cfg.parse_args()
@@ -42,6 +80,7 @@ def main():
     #     T.RandomHorizontalFlip(),
     #     T.ToTensor(),
     # ])
+
     train_transforms = A.Compose([
         A.Resize(352, 352),
         A.HorizontalFlip(p=0.5),
@@ -99,9 +138,10 @@ def main():
         "D:/2025-research/Polyp-KAN-AdapterNet/datasets/kvasir/images/test","D:/2025-research/Polyp-KAN-AdapterNet/datasets/kvasir/masks/test",
         transforms=val_transforms
     )
-    train_loader = DataLoader(train_ds, batch_size=args.b, shuffle=True, num_workers=4)
-    val_loader   = DataLoader(val_ds,   batch_size=args.b//2, shuffle=False, num_workers=2)
-    test_loader = DataLoader(test_ds, batch_size=args.b// 2, shuffle=False, num_workers=2)
+
+    train_loader = DataLoader(train_ds, batch_size=args.b, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+    val_loader   = DataLoader(val_ds,   batch_size=args.b//2, shuffle=False, num_workers=2, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(test_ds, batch_size=args.b// 2, shuffle=False, num_workers=2, pin_memory=True)
 
     # After dataset creation
     if getattr(args, 'cache_warmup', False):  # Handles missing argument
@@ -187,6 +227,18 @@ def main():
         eta_min=1e-6
     )
 
+    # #cosine annealing scheduler isn't validation sensitive so it can be changed later to
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer,
+    #     mode='max',  # Track Dice (higher is better)
+    #     factor=0.5,
+    #     patience=5,
+    #     verbose=True
+    # )
+    #
+    # # Then in training loop:
+    # scheduler.step(val_dice)  # Step with validation metric
+
     # ─── Checkpoint & TensorBoard Setup ─────────────────────────────────────┐
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join(settings.LOG_DIR, args.exp_name, now)
@@ -196,11 +248,31 @@ def main():
     writer = SummaryWriter(log_dir=log_dir)
     # ─────────────────────────────────────────────────────────────────────────┘
 
+    start_epoch = 1
     best_dice = 0.0
+    early_stopper = EarlyStopper(patience=15)
+
+    if args.resume:
+        print(f"Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        net.load_state_dict(checkpoint['state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_dice = checkpoint.get('best_dice', 0.0)
+        print(f"Resuming training from epoch {start_epoch}")
 
     # ─── Training Loop ─────────────────────────────────────────────────────────
-    for epoch in range(1, settings.EPOCH+1):
-        print(f"\n=== Epoch {epoch}/{settings.EPOCH} ===")
+    for epoch in range(start_epoch, settings.EPOCH+1):
+        # GPU monitoring
+        if epoch % 5 == 0:
+            gpus = GPUtil.getGPUs()
+            for i, gpu in enumerate(gpus):
+                writer.add_scalar(f"GPU/Usage_{i}", gpu.load * 100, epoch)
+                writer.add_scalar(f"GPU/Memory_{i}", gpu.memoryUsed, epoch)
+                print(f"GPU {i}: {gpu.load * 100:.1f}% load, "
+                      f"{gpu.memoryUsed:.0f}/{gpu.memoryTotal:.0f} MB")
+
+        # print(f"\n=== Epoch {epoch}/{settings.EPOCH} ===")
 
         # --- Training ---
         net.train()
@@ -218,8 +290,30 @@ def main():
             )
         print(f"[VAL] IOU: {val_iou:.4f}  Dice: {val_dice:.4f}  Tol: {val_tol:.4f}")
 
+        # Add TensorBoard image visualization
+        if epoch % 10 == 0:
+            # Get a validation batch
+            sample_images, sample_masks, sample_paths = next(iter(val_loader))
+            sample_images = sample_images.to(device)
+
+            with torch.no_grad():
+                sample_outputs = net(sample_images)
+
+            # Log to TensorBoard
+            writer.add_images("Val/Input", sample_images[:4], epoch)
+            writer.add_images("Val/Prediction",
+                              torch.sigmoid(sample_outputs[:4]) > 0.5, epoch)
+            writer.add_images("Val/GroundTruth",
+                              sample_masks[:4].unsqueeze(1), epoch)
+
+        # Early stopping check
+        if early_stopper(val_dice):
+            print(f"Early stopping triggered at epoch {epoch}!")
+            break
+
         # --- Scheduler Step ---
-        scheduler.step(train_loss)
+        # scheduler.step(train_loss)
+        scheduler.step()  # CosineAnnealingWarmRestarts doesn't take a metric argument
 
         # --- Checkpointing on Best Dice ---
         if val_dice > best_dice:
@@ -235,6 +329,33 @@ def main():
 
     writer.close()
     print("Training complete.")
+
+    # ─── Test Functionality ────────────────────────────────────────────────
+    print("\nStarting testing...")
+    test_results_dir = os.path.join(ckpt_dir, "test_results")
+    os.makedirs(test_results_dir, exist_ok=True)
+
+    net.eval()
+    with torch.no_grad():
+        for images, masks, img_paths in tqdm(test_loader, desc="Testing"):
+            images = images.to(device)
+            outputs = net(images)
+            predictions = torch.sigmoid(outputs) > 0.5
+
+            # Save results with original filenames
+            for i in range(len(img_paths)):
+                orig_name = Path(img_paths[i]).stem
+
+                # Save prediction
+                pred_path = os.path.join(test_results_dir, f"{orig_name}_pred.png")
+                torchvision.utils.save_image(predictions[i].float(), pred_path)
+
+                # Save overlay (optional)
+                overlay = create_overlay(images[i], predictions[i])
+                overlay_path = os.path.join(test_results_dir, f"{orig_name}_overlay.png")
+                torchvision.utils.save_image(overlay, overlay_path)
+
+    print(f"Test results saved to {test_results_dir}")
 
 if __name__ == "__main__":
 

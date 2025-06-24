@@ -49,6 +49,7 @@ def parse_args():
     parser.add_argument('-data_path', type=str, default='../data', help='The path of segmentation data')
     parser.add_argument('--amp', action='store_true', help='Enable mixed precision training')
     parser.add_argument('--cache_warmup', action='store_true', default=False, help='Preload all dataset samples into memory')
+    parser.add_argument('--resume', type=str, default=None, help='Checkpoint path to resume from')
     # '../dataset/RIGA/DiscRegion'
     # '../dataset/ISIC'
     opt = parser.parse_args()
