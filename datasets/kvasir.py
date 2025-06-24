@@ -17,12 +17,18 @@ class KvasirSegDataset(Dataset):
 
     def __getitem__(self, idx):
         # Load mask first with proper thresholding
+        img_path = self.image_files[idx] #return path
+        mask_path = self.mask_files[idx] #return path
+
         mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
         mask = (mask > 127).astype(np.float32)  # Threshold EARLY at numpy level
         mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)  # Match albumentations input format
         img  = cv2.imread(self.img_paths[idx])[:,:,::-1]  # BGR→RGB
         # mask = cv2.imread(self.mask_paths[idx], 0)        # grayscale
+
+        # Apply transforms (if any)
         if self.transforms:
+            # Note: Albumentations expects image and mask in specific formats
             data = self.transforms(image=img, mask=mask)
             img, mask = data["image"], data["mask"]
         # Ensure mask has proper shape [1, H, W]
@@ -42,10 +48,12 @@ class KvasirSegDataset(Dataset):
         #     mask = torch.from_numpy(mask)
         #
         # mask = (mask.unsqueeze(0).float() > 127).float()
+        return img, mask, img_path  # Return tuple: (image, mask, image_path)
 
-        return {'image': img, 'mask': mask,
-                'image_meta_dict': { 'filename_or_obj': os.path.basename(self.img_paths[idx])}
-                 }
+        # return {'image': img, 'mask': mask,
+        #         'image_meta_dict': { 'filename_or_obj': os.path.basename(self.img_paths[idx])}
+        #          }
+
                 # "image_meta_dict": {"filename_or_obj": self.img_paths[idx]}
 
 
@@ -81,14 +89,24 @@ class CachedKvasir(KvasirSegDataset):
         if idx in self.cache:
             return self.cache[idx]
 
-        sample = super().__getitem__(idx)
+        # Get from parent class
+        img, mask, img_path = super().__getitem__(idx)
+        # Cache handling
+        if self.pin_memory and isinstance(img, torch.Tensor):
+            img = img.pin_memory()
+        if self.pin_memory and isinstance(mask, torch.Tensor):
+            mask = mask.pin_memory()
 
-        if self.pin_memory:
-            sample['image'] = sample['image'].pin_memory()
-            sample['mask'] = sample['mask'].pin_memory()
+        # Create tuple to return
+        sample = (img, mask, img_path)
+        # sample = super().__getitem__(idx)
+        # if self.pin_memory:
+        #     sample['image'] = sample['image'].pin_memory()
+        #     sample['mask'] = sample['mask'].pin_memory()
 
         if self.cache_size > 0:
             if len(self.cache) >= self.cache_size:
+                # Remove oldest cache entry
                 del self.cache[self.cache_order.pop(0)]
             self.cache[idx] = sample
             self.cache_order.append(idx)
