@@ -31,9 +31,11 @@ class D_ConvLayer(nn.Module):
         super(D_ConvLayer, self).__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, in_ch, 3, padding=1),
+            nn.Dropout2d(0.3),  # Adding dropout for regularization
             nn.BatchNorm2d(in_ch),
             nn.ReLU(inplace=True),
             nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            nn.Dropout2d(0.3),  # Adding dropout for regularization
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True)
         )
