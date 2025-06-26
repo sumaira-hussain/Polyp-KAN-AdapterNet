@@ -17,8 +17,8 @@ class KvasirSegDataset(Dataset):
 
     def __getitem__(self, idx):
         # Load mask first with proper thresholding
-        img_path = self.image_files[idx] #return path
-        mask_path = self.mask_files[idx] #return path
+        img_path = self.image_paths[idx] #return path
+        mask_path = self.mask_paths[idx] #return path
 
         mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
         mask = (mask > 127).astype(np.float32)  # Threshold EARLY at numpy level
