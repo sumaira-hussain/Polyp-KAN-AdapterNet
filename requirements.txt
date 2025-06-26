@@ -1,0 +1,14 @@
+torch
+torchvision
+tensorboardX
+tqdm
+albumentations
+opencv-python
+numpy
+matplotlib
+GPUtil
+lion-pytorch
+scikit-learn
+scikit-image
+Pillow
+tensorboard
