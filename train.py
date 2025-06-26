@@ -289,6 +289,8 @@ def main():
                 args, val_loader, epoch, net, writer
             )
         print(f"[VAL] IOU: {val_iou:.4f}  Dice: {val_dice:.4f}  Tol: {val_tol:.4f}")
+        writer.add_scalar('Val/IoU', val_iou, epoch)
+        writer.add_scalar('Val/Dice', val_dice, epoch)
 
         # Add TensorBoard image visualization
         if epoch % 10 == 0:

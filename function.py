@@ -154,7 +154,7 @@ def train_sam(args, net: nn.Module, optimizer, scaler, train_loader,
     #     lossfunc = criterion_G
 
     with tqdm(total=len(train_loader), desc=f'Epoch {epoch}', unit='img') as pbar:
-        for pack in train_loader:
+        for batch_idx, pack in train_loader:
             # torch.cuda.empty_cache()
             imgs = pack['image'].to(dtype=torch.float32, device=GPUdevice)
             masks = pack['mask'].to(dtype=torch.float32, device=GPUdevice)
@@ -356,6 +356,7 @@ def train_sam(args, net: nn.Module, optimizer, scaler, train_loader,
 
             loss = lossfunc(pred, masks)
 
+            # Check for NaN / Inf loss
             if not torch.isfinite(loss).all():
                 print(f"NaN/Inf loss detected! Pred min/max: {pred.min().item():.4f}/{pred.max().item():.4f}")
 
@@ -365,6 +366,11 @@ def train_sam(args, net: nn.Module, optimizer, scaler, train_loader,
 
             if loss.requires_grad:
                 loss.retain_grad()
+
+            # <=== Add TensorBoard logging here ===>
+            global_step = epoch * len(train_loader) + batch_idx
+            writer.add_scalar('Train/Loss', loss.item(), global_step)
+            writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], global_step)
 
             pbar.set_postfix(**{'loss (batch)': loss.item()})
             epoch_loss += loss.item()
