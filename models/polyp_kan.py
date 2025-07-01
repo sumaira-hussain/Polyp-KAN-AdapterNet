@@ -351,9 +351,18 @@ class UKAN(nn.Module):
 
     def forward(self, x):
         # Add dimension correction HERE
-        if x.shape[1] != 3:  # If channels are not in position 1
-            x = x.permute(0, 3, 1, 2).contiguous()  # [B, H, W, C] → [B, C, H, W]
-
+        # if x.shape[1] != 3:  # If channels are not in position 1
+        #     x = x.permute(0, 3, 1, 2).contiguous()  # [B, H, W, C] → [B, C, H, W]
+        # Robust dimension correction
+        if x.dim() == 4:
+            if x.shape[1] == 3:  # Already NCHW
+                pass
+            elif x.shape[3] == 3:  # NHWC -> convert to NCHW
+                x = x.permute(0, 3, 1, 2).contiguous()
+            else:
+                raise ValueError(f"Input must have 3 channels. Got shape {x.shape}")
+        else:
+            raise ValueError(f"Input must be 4D tensor. Got {x.dim()} dimensions")
         B = x.shape[0]
 
         # Get shared prompt embedding for all adapters
