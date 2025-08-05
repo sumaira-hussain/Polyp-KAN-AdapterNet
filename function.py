@@ -158,8 +158,8 @@ def train_sam(args, net: nn.Module, optimizer, scaler, train_loader,
             # torch.cuda.empty_cache()
             imgs = pack['image'].to(dtype=torch.float32, device=GPUdevice)
             masks = pack['mask'].to(dtype=torch.float32, device=GPUdevice)
-            if imgs.shape[1] != 3:  # Only permute if channel is not in 2nd dim
-                imgs = imgs.permute(0, 3, 1, 2)  # NHWC → NCHW
+            # if imgs.shape[1] != 3:  # Only permute if channel is not in 2nd dim
+            #     imgs = imgs.permute(0, 3, 1, 2)  # NHWC → NCHW
 
             if 'pt' not in pack:
                 imgs, pt, masks = generate_click_prompt(imgs, masks)
@@ -672,4 +672,5 @@ def get_rescaled_pts(batched_points: torch.Tensor, input_h: int, input_w: int):
             ),
         ],
         dim=-1,
+
     )
