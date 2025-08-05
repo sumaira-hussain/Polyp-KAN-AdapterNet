@@ -355,14 +355,18 @@ class UKAN(nn.Module):
         #     x = x.permute(0, 3, 1, 2).contiguous()  # [B, H, W, C] → [B, C, H, W]
         # Robust dimension correction
         if x.dim() == 4:
-            if x.shape[1] == 3:  # Already NCHW
-                pass
-            elif x.shape[3] == 3:  # NHWC -> convert to NCHW
-                x = x.permute(0, 3, 1, 2).contiguous()
+            if x.shape[1] == 3:  # NCHW format
+                pass  # Already correct
+            elif x.shape[3] == 3:  # NHWC format
+                x = x.permute(0, 3, 1, 2).contiguous()  # Convert to NCHW
             else:
-                raise ValueError(f"Input must have 3 channels. Got shape {x.shape}")
+                # Handle unexpected channel position
+                channels = x.shape[1]
+                if channels != 3:
+                    raise ValueError(f"Input must have 3 channels. Got {channels} channels")
         else:
             raise ValueError(f"Input must be 4D tensor. Got {x.dim()} dimensions")
+
         B = x.shape[0]
 
         # Get shared prompt embedding for all adapters
@@ -762,4 +766,5 @@ if __name__ == '__main__':
     batch_size = 8
     model = UNet(
         T=1000, ch=64, ch_mult=[1, 2, 2, 2], attn=[1],
+
         num_res_blocks=2, dropout=0.1)
